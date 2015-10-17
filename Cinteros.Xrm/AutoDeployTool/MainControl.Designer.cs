@@ -62,6 +62,7 @@
             // 
             // tsMenu
             // 
+            this.tsMenu.ImageScalingSize = new System.Drawing.Size(28, 28);
             this.tsMenu.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
             this.tsbClose});
             this.tsMenu.Location = new System.Drawing.Point(0, 0);
@@ -76,7 +77,7 @@
             this.tsbClose.Image = ((System.Drawing.Image)(resources.GetObject("tsbClose.Image")));
             this.tsbClose.ImageTransparentColor = System.Drawing.Color.Magenta;
             this.tsbClose.Name = "tsbClose";
-            this.tsbClose.Size = new System.Drawing.Size(83, 34);
+            this.tsbClose.Size = new System.Drawing.Size(95, 34);
             this.tsbClose.Text = "Close";
             this.tsbClose.Click += new System.EventHandler(this.tsbClose_Click);
             // 
@@ -129,6 +130,7 @@
             // 
             // bPluginStopWatch
             // 
+            this.bPluginStopWatch.Enabled = false;
             this.bPluginStopWatch.Location = new System.Drawing.Point(169, 28);
             this.bPluginStopWatch.Name = "bPluginStopWatch";
             this.bPluginStopWatch.Size = new System.Drawing.Size(158, 42);
@@ -248,6 +250,7 @@
             // 
             // bJavascriptStopWatch
             // 
+            this.bJavascriptStopWatch.Enabled = false;
             this.bJavascriptStopWatch.Location = new System.Drawing.Point(169, 29);
             this.bJavascriptStopWatch.Name = "bJavascriptStopWatch";
             this.bJavascriptStopWatch.Size = new System.Drawing.Size(158, 42);

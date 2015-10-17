@@ -12,6 +12,7 @@ namespace Cinteros.Xrm.AutoDeployTool
     using Microsoft.Xrm.Sdk.Query;
     using XrmToolBox.Extensibility;
     using XrmToolBox.Extensibility.Interfaces;
+    using System.ServiceModel;
 
     public partial class MainControl : PluginControlBase, IGitHubPlugin
     {
@@ -26,21 +27,9 @@ namespace Cinteros.Xrm.AutoDeployTool
 
         #region Public Properties
 
-        string IGitHubPlugin.RepositoryName
-        {
-            get
-            {
-                return "XrmToolBox.Plugins";
-            }
-        }
+        string IGitHubPlugin.RepositoryName => "XrmToolBox.Plugins";
 
-        string IGitHubPlugin.UserName
-        {
-            get
-            {
-                return "Cinteros";
-            }
-        }
+        string IGitHubPlugin.UserName => "Cinteros";
 
         #endregion Public Properties
 
@@ -79,12 +68,16 @@ namespace Cinteros.Xrm.AutoDeployTool
             if (sourceButton == "bPluginStartWatch")
             {
                 this.Watcher.Filter = "*.dll";
-                lblPluginWatch.Text = "Watching " + fbdWatch.SelectedPath;
+                lblPluginWatch.Text = $"Watching {fbdWatch.SelectedPath}";
+                bPluginStopWatch.Enabled = true;
+                tbLogPlugin.Text = "";
             }
             else if (sourceButton == "bJavascriptStartWatch")
             {
                 this.Watcher.Filter = "*.js";
-                lblJavascriptWatch.Text = "Watching " + fbdWatch.SelectedPath;
+                lblJavascriptWatch.Text = $"Watching {fbdWatch.SelectedPath}";
+                bJavascriptStopWatch.Enabled = true;
+                tbLogJavascript.Text = "";
             }
             this.Watcher.IncludeSubdirectories = true;
             this.Watcher.NotifyFilter = NotifyFilters.LastWrite;
@@ -133,7 +126,7 @@ namespace Cinteros.Xrm.AutoDeployTool
                 }
                 catch (Exception ex)
                 {
-                    tbLogPlugin.Text += string.Format("{0}: Assembly '{1}' was not updated. The reason is exception raised: '{2}'.\r\n", DateTime.Now, fileName, ex.Message);
+                    Log(tbLogPlugin, $"Assembly '{fileName}' was not updated. The reason is exception raised: '{ex.Message}'.", MessageType.ERROR);
                 }
             }));
         }
@@ -142,33 +135,32 @@ namespace Cinteros.Xrm.AutoDeployTool
         {
             if (fileName.EndsWith(".js"))
             {
-                tbLogJavascript.AppendText(string.Format("{1}: Javascript {0} changed in local filesystem{2} ", fileName, DateTime.Now.ToString("G"), Environment.NewLine));
-                var result = UpdateFile(filePath, fileName, string.Format(@"
+                Log(tbLogJavascript, $"Javascript {fileName} changed in local filesystem");
+                var result = UpdateFile(filePath, fileName, $@"
                 <fetch count='1' >
                     <entity name='webresource' >
                     <attribute name='name' />
                     <attribute name='displayname' />
                     <filter>
                         <condition attribute='webresourcetype' operator='eq' value='3' />
-                        <condition attribute='displayname' operator='eq' value='{0}' />
+                        <condition attribute='displayname' operator='eq' value='{fileName}' />
                     </filter>
                     </entity>
-                </fetch>", fileName.Replace(".js", "")), "Javascript");
+                </fetch>", ResourceType.Javascript);
                 if (!result)
                 {
-                    tbLogJavascript.AppendText(string.Format("{1}: Cannot locate {0} in CRM{2}", fileName,
-                        DateTime.Now.ToString("G"), Environment.NewLine));
+                    Log(tbLogJavascript, $"Cannot locate {fileName} in CRM");
+                    CreateJavascriptWebresource(filePath, fileName);
                 }
                 else
                 {
-                    tbLogJavascript.AppendText(string.Format("{1}: Javascript {0} updated in CRM{2}", fileName,
-                        DateTime.Now.ToString("G"), Environment.NewLine));
+                    Log(tbLogJavascript, $"Javascript {fileName} updated in CRM");
                 }
             }
             else if (fileName.EndsWith(".dll"))
             {
-                tbLogPlugin.AppendText(string.Format("{1}: Assembly {0} changed in local filesystem{2}", fileName, DateTime.Now.ToString("G"), Environment.NewLine));
-                var result = UpdateFile(filePath, fileName, string.Format(@"
+                Log(tbLogPlugin, $"Assembly {fileName} changed in local filesystem");
+                var result = UpdateFile(filePath, fileName, $@"
                 <fetch count='1' >
                     <entity name='pluginassembly' >
                     <attribute name='pluginassemblyid' />
@@ -176,113 +168,142 @@ namespace Cinteros.Xrm.AutoDeployTool
                     <attribute name='ismanaged' />
                     <attribute name='path' />
                     <filter>
-                        <condition attribute='name' operator='eq' value='{0}' />
+                        <condition attribute='name' operator='eq' value='{fileName.Replace(".dll", "")}' />
                     </filter>
                     </entity>
-                </fetch>", fileName.Replace(".dll", "")), "Assembly");
+                </fetch>", ResourceType.Assembly);
                 if (!result)
                 {
-                    tbLogPlugin.AppendText(string.Format("{1}: Cannot locate {0} in CRM{2}", fileName,
-                        DateTime.Now.ToString("G"), Environment.NewLine));
+                    Log(tbLogPlugin, $"Cannot locate {fileName} in CRM");
+                    var assemblyId = CreateAssembly(filePath);
+                    if (assemblyId != Guid.Empty)
+                    {
+                        ParseAssemblyAndRegisterSteps(filePath, assemblyId);
+                    }
                 }
                 else
                 {
-                    tbLogPlugin.AppendText(string.Format("{1}: Assembly {0} updated in CRM{2}", fileName,
-                        DateTime.Now.ToString("G"), Environment.NewLine));
+                    Log(tbLogPlugin, $"Assembly {fileName} updated in CRM");
                 }
             }
         }
 
-        private bool UpdateFile(string filePath, string fileName, string fetchXml, string resourceType)
+        private void ParseAssemblyAndRegisterSteps(string filePath, Guid assemblyId)
+        {
+            var assembly = Assembly.LoadFrom(filePath);
+            foreach (var exportedType in assembly.ExportedTypes.Where(x => x.IsClass))
+            {
+                if (exportedType.IsSubclassOf(typeof(System.Activities.Activity)) ||
+                    (exportedType.GetInterface(typeof(IPlugin).Name) != null && exportedType.BaseType != typeof(Object)))
+                {
+                    RegisterTypeAsStep(exportedType, assembly, assemblyId);
+                }
+            }
+        }
+
+        private void RegisterTypeAsStep(Type exportedType, Assembly assembly, Guid assemblyId)
+        {
+            var assemblyName = assembly.GetName();
+            var assemblyStep = new Entity("plugintype");
+            assemblyStep["pluginassemblyid"] = new EntityReference("pluginassembly", assemblyId);
+            assemblyStep["typename"] = exportedType.FullName;
+            assemblyStep["friendlyname"] = exportedType.Name;
+            assemblyStep["name"] = exportedType.FullName;
+            if (exportedType.IsSubclassOf(typeof(System.Activities.Activity)))
+            {
+                assemblyStep["workflowactivitygroupname"] = $"{assemblyName.Name} ({assemblyName.Version.ToString()})"; ;
+            }
+            try
+            {
+                Service.Create(assemblyStep);
+                Log(tbLogPlugin, $"Registered step {exportedType.Name}");
+            }
+            catch (FaultException<OrganizationServiceFault> fe)
+            {
+                Log(tbLogPlugin, $"Unable to register step {exportedType.Name}. {fe.Message}", MessageType.ERROR);
+            }
+        }
+
+        private void CreateJavascriptWebresource(string filePath, string fileName)
+        {
+            Log(tbLogJavascript, $"Attempting to create javascript webresource {fileName} in CRM");
+            var jsWebResource = new Entity("webresource");
+            jsWebResource["name"] = "scripts_/"+string.Join("\\", filePath.Split('\\').Skip(1)).Replace("\\","/");
+            jsWebResource["displayname"] = fileName;
+            jsWebResource["webresourcetype"] = new OptionSetValue(3);//javascript
+            jsWebResource["content"] = Convert.ToBase64String(ReadFile(filePath));
+            try
+            {
+                Service.Create(jsWebResource);
+            }
+            catch (FaultException<OrganizationServiceFault> fe)
+            {
+                Log(tbLogJavascript, $"Unable to create Javascript webresource {fileName}. {fe.Message}", MessageType.ERROR);
+            }
+            Log(tbLogJavascript, $"Created Javascript webresource {fileName} in CRM");
+        }
+
+        private Guid CreateAssembly(string filePath)
+        {
+            var assemblyId = Guid.Empty;
+            Log(tbLogPlugin, $"Attempting to create assembly in {filePath} in CRM");
+            var assembly = Assembly.LoadFrom(filePath);
+            var assemblyName = assembly.GetName();
+            var assemblyTokenBytes = assemblyName.GetPublicKeyToken();
+            var crmAssembly = new Entity("pluginassembly");
+            crmAssembly["name"] = assemblyName.Name;
+            crmAssembly["sourcetype"] = new OptionSetValue(0); //database
+            crmAssembly["content"] = Convert.ToBase64String(ReadFile(filePath));
+            crmAssembly["culture"] = assemblyName.CultureInfo == System.Globalization.CultureInfo.InvariantCulture ? "neutral" : assemblyName.CultureInfo.Name;
+            if(assemblyTokenBytes == null || assemblyTokenBytes.Length == 0)
+            {
+                crmAssembly["publickeytoken"] = null;
+            }
+            else
+            {
+                crmAssembly["publickeytoken"] = string.Join(string.Empty, assemblyTokenBytes.Select(b => b.ToString("X2")));
+            }
+            crmAssembly["version"] = assemblyName.Version.ToString();
+            crmAssembly["name"] = assemblyName.Name;
+            if (ConnectionDetail.UseOnline)
+            {
+                crmAssembly["isolationmode"] = new OptionSetValue((int)Common.SDK.IsolationMode.Sandbox);
+            }
+            else
+            {
+                crmAssembly["isolationmode"] = new OptionSetValue((int)Common.SDK.IsolationMode.None);
+            }
+            try
+            {
+                assemblyId = Service.Create(crmAssembly);
+            }
+            catch (FaultException<OrganizationServiceFault> fe)
+            {
+                Log(tbLogPlugin, $"Unable to create assembly {assemblyName.Name}. {fe.Message}", MessageType.ERROR);
+            }
+            Log(tbLogPlugin, $"Created assembly {assemblyName.Name} in CRM");
+            return assemblyId;
+        }
+
+        private bool UpdateFile(string filePath, string fileName, string fetchXml, ResourceType resourceType)
         {
             var result = Service.RetrieveMultiple(new FetchExpression(fetchXml));
             if (!result.Entities.Any()) return false;
             var resourceToUpdate = result[0];
             resourceToUpdate["content"] = Convert.ToBase64String(ReadFile(filePath));
-            Service.Update(resourceToUpdate);
-            return true;
-        }
-
-        private Guid GetAssemblyId(string fileName)
-        {
-            var assembly = Assembly.Load(this.ReadFile(fileName));
-
-            var chunks = assembly.FullName.Split(new string[] { ", ", "Version=", "Culture=", "PublicKeyToken=" }, StringSplitOptions.RemoveEmptyEntries);
-
-            var query = new QueryExpression("pluginassembly");
-            query.Criteria.AddCondition("name", ConditionOperator.Equal, chunks[0]);
-            query.Criteria.AddCondition("version", ConditionOperator.Equal, chunks[1]);
-            query.Criteria.AddCondition("culture", ConditionOperator.Equal, chunks[2]);
-            query.Criteria.AddCondition("publickeytoken", ConditionOperator.Equal, chunks[3]);
-
-            var plugin = this.Service == null ? null : this.Service.RetrieveMultiple(query).Entities.FirstOrDefault();
-
-            if (plugin != null)
+            try
             {
-                return plugin.Id;
+                Service.Update(resourceToUpdate);
+                return true;
             }
-            else
+            catch (FaultException<OrganizationServiceFault> fe)
             {
-                return Guid.Empty;
+                if(resourceType == ResourceType.Javascript)
+                    Log(tbLogJavascript, $"Unable to update Javascript webresource {fileName}. {fe.Message}", MessageType.ERROR);
+                else
+                    Log(tbLogPlugin, $"Unable to update assembly {fileName}. {fe.Message}", MessageType.ERROR);
+                return false;
             }
-        }
-
-        private void Plugin_Changed(object sender, FileSystemEventArgs e)
-        {
-            // Waiting for plugin become fully available for reading
-            while (true)
-            {
-                try
-                {
-                    using (var stream = File.Open(e.FullPath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
-                    {
-                        if (stream != null)
-                        {
-                            break;
-                        }
-                    }
-                }
-                catch (FileNotFoundException)
-                {
-                }
-                catch (IOException)
-                {
-                }
-                catch (UnauthorizedAccessException)
-                {
-                }
-
-                Thread.Sleep(500);
-            }
-
-            this.Invoke(new Action(() =>
-                {
-                    try
-                    {
-                        var lastWriteTime = File.GetLastWriteTime(this.lPlugin.Text);
-                        if (lastWriteTime != LastRead)
-                        {
-                            tbLogPlugin.Text += string.Format("{0}: Assembly '{1}' was changed.\r\n", DateTime.Now, Path.GetFileName(this.lPlugin.Text));
-
-                            var plugin = new Entity("pluginassembly")
-                            {
-                                Id = this.PluginId
-                            };
-
-                            plugin["content"] = Convert.ToBase64String(this.ReadFile(this.lPlugin.Text));
-
-                            this.Service.Update(plugin);
-
-                            tbLogPlugin.Text += string.Format("{0}: Assembly '{1}' was updated on the server.\r\n", DateTime.Now, Path.GetFileName(this.lPlugin.Text));
-
-                            LastRead = lastWriteTime;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        tbLogPlugin.Text += string.Format("{0}: Assembly '{1}' was not updated. The reason is exception raised: '{2}'.\r\n", DateTime.Now, Path.GetFileName(this.lPlugin.Text), ex.Message);
-                    }
-                }));
         }
 
         private byte[] ReadFile(string fileName)
@@ -301,7 +322,7 @@ namespace Cinteros.Xrm.AutoDeployTool
             // Preparing to dispose watcher
             if (this.Watcher != null)
             {
-                this.Watcher.Changed -= this.Plugin_Changed;
+                this.Watcher.Changed -= this.Watcher_OnChanged;
             }
 
             this.CloseTool();
@@ -311,18 +332,36 @@ namespace Cinteros.Xrm.AutoDeployTool
 
         private void StopWatch_Click(object sender, EventArgs e)
         {
-            var sourceButton = ((Button)sender).Name;
+            var sourceButton = ((Button)sender);
+            sourceButton.Enabled = false;
             Watcher.Changed -= Watcher_OnChanged;
-            if (sourceButton == "bPluginStopWatch")
+            if (sourceButton.Name == "bPluginStopWatch")
             {
-                tbLogPlugin.AppendText(string.Format("{2}: Stopped watching changes in {0}{1}", fbdWatch.SelectedPath, Environment.NewLine, DateTime.Now.ToString("G")));
+                Log(tbLogPlugin, $"Stopped watching changes in {fbdWatch.SelectedPath}");
                 lblPluginWatch.Text = "";
             }
-            else if (sourceButton == "bJavascriptStopWatch")
+            else if (sourceButton.Name == "bJavascriptStopWatch")
             {
-                tbLogJavascript.AppendText(string.Format("{2}: Stopped watching changes in {0}{1}", fbdWatch.SelectedPath, Environment.NewLine, DateTime.Now.ToString("G")));
+                Log(tbLogJavascript, $"Stopped watching changes in {fbdWatch.SelectedPath}");
                 lblJavascriptWatch.Text = "";
             }
         }
+
+        private void Log(TextBox t, string message, MessageType messageType = MessageType.INFORMATION)
+        {
+            t.AppendText($"{DateTime.Now.ToString("G")}: { (messageType == MessageType.ERROR ? "ERROR " : string.Empty) }{message}{Environment.NewLine}");
+        }
+    }
+
+    enum ResourceType
+    {
+        Javascript,
+        Assembly
+    }
+
+    enum MessageType
+    {
+        INFORMATION,
+        ERROR
     }
 }
